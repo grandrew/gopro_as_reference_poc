@@ -9,14 +9,14 @@ from tqdm import tqdm
 
 ORIG_WIDTH = 0
 ORIG_HEIGHT = 0
-TRAIN_EPOCHS = 1000
+TRAIN_EPOCHS = 400
 
 im_sz = 1024
 mp_sz = 96
 
 warp_scale = 0.05
-mult_scale = 0.4
-add_scale = 0.4
+mult_scale = 0
+add_scale = 0
 add_first = False
 
 
@@ -39,28 +39,74 @@ def create_grid(scale):
 
 
 def produce_warp_maps(origins, targets):
+
     class MyModel(tf.keras.Model):
         def __init__(self):
             super(MyModel, self).__init__()
-            self.conv1 = tf.keras.layers.Conv2D(64, (5, 5))
+            self.conv1 = tf.keras.layers.Conv2D(64, (5, 5), padding='same')
             self.act1 = tf.keras.layers.LeakyReLU(alpha=0.2)
-            self.conv2 = tf.keras.layers.Conv2D(64, (5, 5))
+            self.pool1 = tf.keras.layers.MaxPooling2D(pool_size=(2, 2))
+
+            self.conv2 = tf.keras.layers.Conv2D(128, (5, 5), padding='same')
             self.act2 = tf.keras.layers.LeakyReLU(alpha=0.2)
-            self.convo = tf.keras.layers.Conv2D((3 + 3 + 2) * 2, (5, 5))
+            self.pool2 = tf.keras.layers.MaxPooling2D(pool_size=(2, 2))
+
+            self.conv3 = tf.keras.layers.Conv2D(256, (5, 5), padding='same')
+            self.act3 = tf.keras.layers.LeakyReLU(alpha=0.2)
+
+            self.upconv4 = tf.keras.layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')
+            self.conv4 = tf.keras.layers.Conv2D(128, (5, 5), padding='same')
+            self.act4 = tf.keras.layers.LeakyReLU(alpha=0.2)
+
+            self.upconv5 = tf.keras.layers.Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')
+            self.conv5 = tf.keras.layers.Conv2D(64, (5, 5), padding='same')
+            self.act5 = tf.keras.layers.LeakyReLU(alpha=0.2)
+
+            self.convo = tf.keras.layers.Conv2D((3 + 3 + 2) * 2, (5, 5), padding='same')
 
         def call(self, maps):
             x = tf.image.resize(maps, [mp_sz, mp_sz])
+
             x = self.conv1(x)
             x = self.act1(x)
+            c1 = x
+            x = self.pool1(x)
+
             x = self.conv2(x)
             x = self.act2(x)
+            c2 = x
+            x = self.pool2(x)
+
+            x = self.conv3(x)
+            x = self.act3(x)
+
+            x = self.upconv4(x)
+            x = tf.keras.layers.concatenate([x, c2])
+            x = self.conv4(x)
+            x = self.act4(x)
+
+            x = self.upconv5(x)
+            x = tf.keras.layers.concatenate([x, c1])
+            x = self.conv5(x)
+            x = self.act5(x)
+
             x = self.convo(x)
+
             return x
+
 
 
     model = MyModel()
 
-    loss_object = tf.keras.losses.MeanSquaredError()
+
+    def custom_loss(y_true, y_pred):
+        mse = tf.reduce_mean(tf.square(y_true - y_pred))
+        ssim = tf.image.ssim(y_true, y_pred, max_val=1.0)
+        tvr = tf.reduce_sum(tf.image.total_variation(y_pred))
+        return mse + (1 - ssim) + 1e-5 * tvr  # Weight for TVR is a hyperparameter to tune
+
+    loss_object = custom_loss
+
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.0002)
 
     train_loss = tf.keras.metrics.Mean(name='train_loss')
